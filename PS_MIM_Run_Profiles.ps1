@@ -1,4 +1,4 @@
-﻿# http://konab.com/scheduling-mim-advanced-options/
+# http://konab.com/scheduling-mim-advanced-options/
 ############
 # PARAMETERS
 ############
@@ -6,74 +6,9 @@ param([parameter(Mandatory=$true)] [string]$RunType)
  
 Import-Module sqlps
 
-If ($RunType -eq "Delta")
-    {
-    $ImportSyncStage = 
-        @(
-        @{MAName="SQLMA-SD";ProfileToRun="DI";};
-        @{MAName="SQLMA-SD";ProfileToRun="DS";};
-        );
-
-    $ImportAsJob = 
-        @(
-        @{MAName="MIMMA";ProfileToRun="DI";};
-        @{MAName="ADMA-Main";ProfileToRun="DI";};
-        @{MAName="ADMA-DM-Z";ProfileToRun="DI";};
-        );
- 
-    $SyncProfilesOrder = 
-        @(
-         @{MAName="SQLMA-SD";ProfileToRun="DS";};
-        #@{MAName="ADMA-Main";profilesToRun=@("DS");};
-        #@{MAName="ADMA-DM-Z";profilesToRun=@("DS");};
-        #@{MAName="MIMMA";profilesToRun=@("DS");};
-        @{MAName="MIMMA";profilesToRun=@("EX";"Sleep:15";"DI";"DS");};
-        );
- 
-    $ExportAsJob = 
-        @(
-        @{MAName="ADMA-Main";ProfileToRun="EX";};
-        @{MAName="ADMA-DM-Z";ProfileToRun="EX";};
-        @{MAName="MIMMA";ProfileToRun="EX";};
-        );
-    #Log "Info" "Running Delta Syncs"
-    }
-ElseIf ($RunType -eq "Full")
-    {
-    $ImportSyncStage = 
-        @(
-        @{MAName="SQLMA-SD";ProfileToRun="FI";};
-        @{MAName="SQLMA-SD";ProfileToRun="FS";};
-        );
-
-    $ImportAsJob = 
-        @(
-        @{MAName="ADMA-Main";ProfileToRun="FI";};
-        @{MAName="ADMA-DM-Z";ProfileToRun="FI";};
-        @{MAName="MIMMA";ProfileToRun="FI";};
-        );
- 
-    $SyncProfilesOrder = 
-        @(
-        @{MAName="ADMA-Main";profilesToRun=@("FS");};
-        @{MAName="ADMA-DM-Z";profilesToRun=@("FS");};
-        @{MAName="MIMMA";profilesToRun=@("EX";"Sleep:15";"DI";"FS");};
-        );
- 
-    $ExportAsJob = 
-        @(
-        @{MAName="ADMA-Main";ProfileToRun="EX";};
-        @{MAName="ADMA-DM-Z";ProfileToRun="EX";};
-        @{MAName="MIMMA";ProfileToRun="EX";};
-        );
-    #Log "Info" "Running Full Syncs"
-    }
-Else
-    {
-    "No run type selected"
-    Break
-    }
-
+$Global:date = get-date -uformat "%Y-%m-%d"
+$Global:FilePath = "C:\Scripts"
+$Global:Logfile = $FilePath + "\"+$date+"-Exchange-Provisioning.txt"
 $Query = @"
 /**** If delta table exists from previous run, drop it ****/
 IF EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES 
@@ -387,10 +322,6 @@ FROM Identities
 --TRUNCATE TABLE Identities_Delta
 "@
 
-$Global:date = get-date -uformat "%Y-%m-%d"
-$Global:FilePath = "C:\Scripts"
-$Global:Logfile = $FilePath + "\"+$date+"-Exchange-Provisioning.txt"
-     
 ############
 # DATA
 ############
@@ -412,144 +343,247 @@ Function Log($EntryType,$entry)
             $DateTime+"-"+$EntryType+"-"+$Entry | Out-File $Logfile -Append
             }
         }
+
+Function Initialize-Sync()
+    {
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting Synchronization Schedule"
+    #Log "Info" "Starting Synchronization Schedule"
+    }
+
+Function Run-ImportStage($ImportSyncStage)
+    {
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting Import Stage"
+    #Log "Info" "Starting Import Stage"
+    foreach($MAToRun in $ImportSyncStage)
+        {
+        foreach($profileName in $MAToRun.profileToRun)
+            {
+            if($profileName.StartsWith("Sleep"))
+                {Start-Sleep -Seconds $profileName.Split(":")[1]}
+            elseif($profileName.StartsWith("Script"))
+                {& ($scriptpath +"\"+ ($profileName.Split(":")[1]))}
+            else
+                {
+                $return = ($MAs | ?{$_.Name -eq $MAToRun.MAName}).Execute($profileName)
+                Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : $($MAToRun.MAName) : $profileName : $($return.ReturnValue)"
+                #Log "Info" "Starting : $($MAToRun.MAName) : $($profileName) : $($return.ReturnValue)"
+                }
+            }
+        }
+    
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Finished Import Stage"
+    #Log "Info" "Finishing Import Stage"
+    }
+
+Function Run-Import($ImportAsJob)
+    {
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting Import Jobs"
+    #Log "Info" "Starting Import Jobs"
+
+    foreach($MAToRun in $ImportAsJob)
+        {
+        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
+        #Log "Info" "Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
+        
+        $void = RunFIMAsJob $MAToRun.MAName $MAToRun.ProfileToRun
+        }
+    
+    Get-Job | Wait-Job | Receive-Job -Keep
+    
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Finished Import Jobs"
+    #Log "Info" "Finishing Import Jobs"
  
+    #Removing Jobs to release resources
+    Get-Job | Remove-Job
+    }
+
+Function Run-Sync($SyncProfilesOrder)
+    {
+    foreach($MAToRun in $SyncProfilesOrder)
+        {
+        foreach($profileName in $MAToRun.profilesToRun)
+            {
+            if($profileName.StartsWith("Sleep"))
+                {Start-Sleep -Seconds $profileName.Split(":")[1]}
+            elseif($profileName.StartsWith("Script"))
+                {& ($scriptpath +"\"+ ($profileName.Split(":")[1]))}
+            else
+                {
+                $return = ($MAs | ?{$_.Name -eq $MAToRun.MAName}).Execute($profileName)
+                Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : $($MAToRun.MAName) : $profileName : $($return.ReturnValue)"
+                #Log "Info" "Starting : $($MAToRun.MAName) : $($profileName) : $($return.ReturnValue)"
+                }
+            }
+        }
+    }
+ 
+Function Run-Export($ExportAsJob)
+    {
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting ExportJobs"
+    foreach($MAToRun in $ExportAsJob)
+        {
+        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
+        #Log "Info" ": Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
+        $void = RunFIMAsJob $MAToRun.MAName $MAToRun.ProfileToRun
+        }
+    Get-Job | Wait-Job | Receive-Job -Keep
+    
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Finished ExportJobs"
+    #Log "Info" "Finished ExportJobs"
+    }
+
+Function Run-ImportConfirm($ImportAsJob)
+    {
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting Confirming Import Jobs"
+    #Log "Info" "Starting Confirming Import Jobs"
+
+    foreach($MAToRun in $ImportAsJob)
+        {
+        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
+        #Log "Info" "Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
+        
+        $void = RunFIMAsJob $MAToRun.MAName $MAToRun.ProfileToRun
+        }
+
+    Get-Job | Wait-Job | Receive-Job -Keep
+
+    #Removing Jobs to release resources
+    Get-Job | Remove-Job
+ 
+    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Finished Confirming Import Jobs"
+    #Log "Info" "Finished Confirming Import Jobs"
+    }
+     
 function RunFIMAsJob
     {
     param([string]$MAName, [string]$Profile)
+    
     Start-Job -Name $MAName -ArgumentList $MAName,$Profile -ScriptBlock {
         param($MAName,$Profile)
         $MA = (get-wmiobject -class "MIIS_ManagementAgent" -namespace "root\MicrosoftIdentityIntegrationServer" -computername "." -Filter "Name='$MAName'")
         $return = $MA.Execute($Profile)
-        (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": Finished : " + $MAName + " : " + $Profile + " : " + $return.ReturnValue
+        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Finished : $MAName : $Profile : $($return.ReturnValue)"
         #Log "Info" ": Finished : " + $MAName + " : " + $Profile + " : " + $return.ReturnValue
         }
     }
 
-Function Create-DeltaTable
+Function Create-DeltaTable($RunType)
     {
-    $Instance = "idmdbprd01\mimstage"
-    $DataBase = "stagingdirectory"
+    if ($RunType -eq "Full")
+        {
+        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Creating SQL Delta Table"
+        #Log "Info" "Creating SQL Delta Table"
+    
+        $Instance = "idmdbprd01\mimstage"
+        $DataBase = "stagingdirectory"
 
-
-    Invoke-Sqlcmd `
-        -ServerInstance $Instance `
-        -Database $DataBase `
-        -query $Query
+        Invoke-Sqlcmd `
+            -ServerInstance $Instance `
+            -Database $DataBase `
+            -query $Query
+    
+        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') : Completed Creating SQL Delta Table"
+        #Log "Info" "Completed Creating SQL Delta Table"
+        }
     } 
 
 Function Send-UserReport
     {
     Send-MailMessage `
         -to "UMTeamDGnestedTest@madisoncollege.edu" `
-        -From "Hanson, Joseph D <jdhanson1@madisoncollege.edu>" `
+        -From "Streeter Joseph A <jstreeter@madisoncollege.edu>" `
         -Body "FIM Sync Complete" `
         -Subject "FIM Sync Complete" `
         -SmtpServer "smtp.madisoncollege.edu" `
     }
 
+Function Finalize-Sync($RunType)
+    {
+    Write-Host (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": ############ Finished ################"
+    #Log "Info" "############ Finished ################"
+
+    if ($RunType -eq "Full")
+        {
+        Send-UserReport
+        }
+    }
 ############
 # PROGRAM
 ############
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": Starting Schedule"
 
-Log "Info" "Starting Synchronization Schedule"
-
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Creating SQL Delta Table"
-Log "Info" "Creating SQL Delta Table"
-
-Create-DeltaTable
-
-#Import Sync (Stage Only)
-foreach($MAToRun in $ImportSyncStage)
+If ($RunType -eq "Delta")
     {
-    foreach($profileName in $MAToRun.profileToRun)
-        {
-        if($profileName.StartsWith("Sleep"))
-            {Start-Sleep -Seconds $profileName.Split(":")[1]}
-        elseif($profileName.StartsWith("Script"))
-            {& ($scriptpath +"\"+ ($profileName.Split(":")[1]))}
-        else
-            {
-            $return = ($MAs | ?{$_.Name -eq $MAToRun.MAName}).Execute($profileName)
-            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": " + $MAToRun.MAName + " : " + $profileName + " : " + $return.ReturnValue
-            Log "Info" "Starting : $($MAToRun.MAName) : $($profileName) : $($return.ReturnValue)"
-            }
-        }
-    }
+    $ImportSyncStage = 
+        @(
+        @{MAName="SQLMA-SD";ProfileToRun="DI"}
+        @{MAName="SQLMA-SD";ProfileToRun="DS"}
+        )
 
-#ImportAsJob
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Starting Import Jobs"
-Log "Info" "Starting Import Jobs"
-
-foreach($MAToRun in $ImportAsJob)
-    {
-        (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": Starting : " + $MAToRun.MAName + " : " + $MAToRun.ProfileToRun
-        Log "Info" "Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
-        
-        $void = RunFIMAsJob $MAToRun.MAName $MAToRun.ProfileToRun
-    }
-Get-Job | Wait-Job | Receive-Job -Keep
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Finished Import Jobs"
-Log "Info" "Finishing Import Jobs"
+    $ImportAsJob = 
+        @(
+        @{MAName="MIMMA";ProfileToRun="DI"}
+        @{MAName="ADMA-Main";ProfileToRun="DI"}
+        @{MAName="ADMA-DM-Z";ProfileToRun="DI"}
+        )
  
-#Removing Jobs to release resources
-Get-Job | Remove-Job
+    $SyncProfilesOrder = 
+        @(
+        @{MAName="SQLMA-SD";ProfileToRun="DS"}
+        @{MAName="ADMA-Main";profilesToRun=@("DS")}
+        @{MAName="ADMA-DM-Z";profilesToRun=@("DS")}
+        @{MAName="MIMMA";profilesToRun=@("DS")}
+        @{MAName="MIMMA";profilesToRun=@("EX";"Sleep:15";"DI";"DS")}
+        )
  
-
-#Sync (not as job)
-foreach($MAToRun in $SyncProfilesOrder)
-    {
-    foreach($profileName in $MAToRun.profilesToRun)
-        {
-        if($profileName.StartsWith("Sleep"))
-            {Start-Sleep -Seconds $profileName.Split(":")[1]}
-        elseif($profileName.StartsWith("Script"))
-            {& ($scriptpath +"\"+ ($profileName.Split(":")[1]))}
-        else
-            {
-            $return = ($MAs | ?{$_.Name -eq $MAToRun.MAName}).Execute($profileName)
-            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": " + $MAToRun.MAName + " : " + $profileName + " : " + $return.ReturnValue
-            Log "Info" "Starting : $($MAToRun.MAName) : $($profileName) : $($return.ReturnValue)"
-            }
-        }
+    $ExportAsJob = 
+        @(
+        @{MAName="ADMA-Main";ProfileToRun="EX"}
+        @{MAName="ADMA-DM-Z";ProfileToRun="EX"}
+        @{MAName="MIMMA";ProfileToRun="EX"}
+        )
+    ##Log "Info" "Running Delta Syncs"
     }
+ElseIf ($RunType -eq "Full")
+    {
+    $ImportSyncStage = 
+        @(
+        @{MAName="SQLMA-SD";ProfileToRun="FI"}
+        @{MAName="SQLMA-SD";ProfileToRun="FS"}
+        )
+
+    $ImportAsJob = 
+        @(
+        @{MAName="ADMA-Main";ProfileToRun="FI"}
+        @{MAName="ADMA-DM-Z";ProfileToRun="FI"}
+        @{MAName="MIMMA";ProfileToRun="FI"}
+        )
  
-#ExportAsJob
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Starting ExportJobs"
-foreach($MAToRun in $ExportAsJob)
-    {
-        (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": Starting : " + $MAToRun.MAName + " : " + $MAToRun.ProfileToRun
-        Log "Info" ": Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
-        $void = RunFIMAsJob $MAToRun.MAName $MAToRun.ProfileToRun
-    }
-Get-Job | Wait-Job | Receive-Job -Keep
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Finished ExportJobs"
-Log "Info" "Finished ExportJobs"
-
-#ImportAsJob (Confirming Input)
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Starting Confirming Import Jobs"
-Log "Info" "Starting Import Jobs"
-
-foreach($MAToRun in $ImportAsJob)
-    {
-        (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": Starting : " + $MAToRun.MAName + " : " + $MAToRun.ProfileToRun
-        Log "Info" "Starting : $($MAToRun.MAName) : $($MAToRun.ProfileToRun)"
-        
-        $void = RunFIMAsJob $MAToRun.MAName $MAToRun.ProfileToRun
-    }
-Get-Job | Wait-Job | Receive-Job -Keep
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +": Finished Import Jobs"
-Log "Info" "Finishing Import Jobs"
-
-#Removing Jobs to release resources
-Get-Job | Remove-Job
+    $SyncProfilesOrder = 
+        @(
+        @{MAName="ADMA-Main";profilesToRun=@("FS")}
+        @{MAName="ADMA-DM-Z";profilesToRun=@("FS")}
+        @{MAName="MIMMA";profilesToRun=@("EX";"Sleep:15";"DI";"FS")}
+        )
  
-(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ": Finished Schedule"
-Log "Info" "Finished Schedule"
-
-Log "Info" "############ Finished ################"
-
-if ($RunType -eq "Full")
-    {
-    Send-UserReport
+    $ExportAsJob = 
+        @(
+        @{MAName="ADMA-Main";ProfileToRun="EX"}
+        @{MAName="ADMA-DM-Z";ProfileToRun="EX"}
+        @{MAName="MIMMA";ProfileToRun="EX"}
+        )
+    ##Log "Info" "Running Full Syncs"
     }
+Else
+    {
+    "No run type selected"
+    Break
+    }
+
+Initialize-Sync
+Create-DeltaTable $RunType
+Run-ImportStage $ImportSyncStage
+Run-Import $ImportAsJob
+Run-Sync $SyncProfilesOrder
+Run-Export $ExportAsJob
+Run-ImportConfirm $ImportAsJob
+Finalize-Sync $RunType
